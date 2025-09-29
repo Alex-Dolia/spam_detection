@@ -1,0 +1,7 @@
+pandas==2.2.3
+numpy==2.2.6
+scikit-learn==1.6.1
+spacy==3.8.6
+truecase==0.0.14
+xgboost==3.0.1
+unidecode==1.4.0
