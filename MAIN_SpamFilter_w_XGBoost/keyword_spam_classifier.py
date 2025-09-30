@@ -35,10 +35,10 @@ class KeywordSpamClassifier:
     A comprehensive keyword spam classifier that addresses the issues in the original approach.
     """
     
-    def __init__(self, use_smote = False, isBayesOpt = False, cv_folds = 5, nlp_model: str = "en_core_web_sm"):
+    def __init__(self,  isBayesOpt = False, use_smote = False, nlp_model: str = "en_core_web_sm"):
         """Initialize the classifier with proper preprocessing components."""
-        self.use_smote = use_smote 
         self.isBayesOpt = isBayesOpt
+        self.use_smote  = use_smote 
 
         self.nlp = None
         self.tfidf_vectorizer = None
@@ -73,11 +73,15 @@ class KeywordSpamClassifier:
         # Normalize non-ASCII characters
         text = unidecode.unidecode(text)
         
-        # Replace special characters with spaces (but preserve hashtags and @ symbols)
-        text = re.sub(r'[,;@#!\?\+\*\n\-: /]', ' ', text)
+        # Keep emojis, symbols, hashtags, mentions, currency, etc.
+        text = re.sub(r'[\n\t\r]+', ' ', text)  # Normalize newlines/tabs
+        text = re.sub(r' +', ' ', text)         # Normalize spaces
+
+        ### Replace special characters with spaces (but preserve hashtags and @ symbols)
+        ### text = re.sub(r'[,;@#!\?\+\*\n\-: /]', ' ', text)
         
-        # Keep alphanumeric characters, spaces, hashtags, and @ symbols
-        text = re.sub(r'[^A-Za-z0-9& #@]', '', text)
+        ### Keep alphanumeric characters, spaces, hashtags, and @ symbols
+        ### text = re.sub(r'[^A-Za-z0-9& #@]', '', text)
         
         # Clean up multiple spaces
         text = ' '.join(text.split())
@@ -211,7 +215,7 @@ class KeywordSpamClassifier:
 
     def calculate_auc_cv(self, X_features, y_true, params):
         """Calculate AUC using stratified cross-validation"""
-        
+
         # Convert parameters to appropriate types
         int_params = ['max_depth', 'n_estimators', 'min_child_weight']
         for param in int_params:
@@ -220,7 +224,7 @@ class KeywordSpamClassifier:
         
         params['random_state'] = self.random_state
         params['use_label_encoder'] = False
-        params['eval_metric'] = 'logloss'
+        #params['eval_metric'] = 'logloss'
         
         xgb_model = xgb.XGBClassifier(**params)
         
@@ -248,7 +252,11 @@ class KeywordSpamClassifier:
             fold_auc = roc_auc_score(y_val, y_pred_proba)
             auc_scores.append(fold_auc)
         
-        return np.mean(auc_scores)
+        score = np.mean(auc_scores)
+        out = params.copy()
+        out["AUC"] = score
+        self.all_parametes.append(out)
+        return score
     
     def objective(self, params):
         """Objective function for Bayesian Optimization"""
@@ -262,9 +270,10 @@ class KeywordSpamClassifier:
             print(f"!!!!!!!!!!!!!!!!!!!! except Exception as e: {e}!!!!!!!!!!!!!!!!!!!!!!")  
             return {'loss': 1.0, 'status': STATUS_OK, 'auc_score': 0.0}
 
-    def bayesian_optimization(self, X_train, y_train):
+    def bayesian_optimization(self, X_train, y_train, xgb_space = None):
         """Perform Bayesian Optimization to find best hyperparameters"""
-        
+        self.all_parametes = []
+
         print("Starting Bayesian Optimization...")
         
         # Calculate scale_pos_weight for imbalanced data
@@ -273,10 +282,11 @@ class KeywordSpamClassifier:
         
         # Define search space for XGBoost
         # I comment out some parameters because I want to check if I optimize the same parameters that I define wo using Bayesian Optimization
-        xgb_space = {
+        if xgb_space is None:
+           xgb_space = {
             'max_depth': hp.quniform('max_depth', 3, 10, 1),
             'learning_rate': hp.uniform('learning_rate', 0.075, 0.25),
-            'n_estimators': hp.quniform('n_estimators', 80, 120, 1),
+            'n_estimators': hp.quniform('n_estimators', 50, 110, 1),
             #'gamma': hp.uniform('gamma', 0, 5),
             #'min_child_weight': hp.quniform('min_child_weight', 1, 10, 1),
             'subsample': hp.uniform('subsample', 0.6, 1.0),
@@ -284,8 +294,9 @@ class KeywordSpamClassifier:
             #'reg_alpha': hp.uniform('reg_alpha', 0, 10),
             #'reg_lambda': hp.uniform('reg_lambda', 0, 10),
             'scale_pos_weight': hp.choice('scale_pos_weight', [scale_pos_weight_value]),
+            'objective': hp.choice('objective', ['binary:logistic']),
             'eval_metric': hp.choice('eval_metric', ['logloss']),
-        }
+           }
         
         # Store data for objective function
         self.X_train_processed = X_train
@@ -308,7 +319,6 @@ class KeywordSpamClassifier:
          show_progressbar=True
         )
 
-        
         # Get best parameters
         best_params = {}
         for key, value in best.items():
@@ -323,9 +333,12 @@ class KeywordSpamClassifier:
         best_params.update({
             'random_state': self.random_state,
             'use_label_encoder': False,
+            'objective': 'binary:logistic',
             'eval_metric': 'logloss'
         })
         
+
+
         # Find best AUC from trials
         best_auc = max([trial['result']['auc_score'] for trial in trials.trials])
         
@@ -391,7 +404,7 @@ class KeywordSpamClassifier:
         all_features_scaled = self.scaler.transform(all_features)
         return all_features_scaled
     
-    def fit(self, X: pd.DataFrame, y: pd.Series, max_evals = 30, cv_folds = None) -> 'KeywordSpamClassifier':
+    def fit(self, X: pd.DataFrame, y: pd.Series, params = None, max_evals = None, cv_folds = None) -> 'KeywordSpamClassifier':
         """
         Fit the classifier on training data.
         
@@ -402,28 +415,30 @@ class KeywordSpamClassifier:
         Returns:
             Self
         """
-        self.max_evals = max_evals
-
+       
         # extract all features
         all_features_scaled, y_out = self.extract_training_features(X, y)
         
         # Train XGBoost model with proper parameters
         if not self.isBayesOpt:
-           self.model = xgb.XGBClassifier(
-               n_estimators=100,  # Much better than 2!
+           if params is not None:
+              self.model = xgb.XGBClassifier(**params) 
+           else: 
+              self.model = xgb.XGBClassifier(
+               n_estimators=100,  
                max_depth=6,
                learning_rate=0.1,
                subsample=0.8,
                colsample_bytree=0.8,
                random_state=42,
                eval_metric='logloss'
-           )
+              )
         else:
+           self.max_evals = 30 if max_evals is None else max_evals 
            self.cv_folds = 3 if cv_folds is None else cv_folds
-           self.best_params, self.trials, self.best_auc = self.bayesian_optimization(X, y)
+           self.best_params, self.trials, self.best_auc = self.bayesian_optimization(X, y, xgb_space = params)
            self.model = xgb.XGBClassifier(**self.best_params)
             
-        
         self.model.fit(all_features_scaled, y_out)
 
         return self
