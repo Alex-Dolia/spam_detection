@@ -18,6 +18,8 @@ import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from sklearn.model_selection import cross_val_score, StratifiedKFold, train_test_split
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 import xgboost as xgb
@@ -522,7 +524,7 @@ def evaluate_model(y_true: np.ndarray, y_pred: np.ndarray, y_proba: np.ndarray =
     Returns:
         Dictionary of evaluation metrics
     """
-    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
     
     metrics = {
         'accuracy': accuracy_score(y_true, y_pred),
