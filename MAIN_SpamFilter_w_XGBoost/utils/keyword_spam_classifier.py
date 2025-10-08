@@ -37,10 +37,11 @@ class KeywordSpamClassifier:
     A comprehensive keyword spam classifier that addresses the issues in the original approach.
     """
     
-    def __init__(self,  isBayesOpt = False, use_smote = False, nlp_model: str = "en_core_web_sm"):
+    def __init__(self,  isBayesOpt = False, use_smote = False, is_fashion_brands_predifinied = True, nlp_model: str = "en_core_web_sm"):
         """Initialize the classifier with proper preprocessing components."""
         self.isBayesOpt = isBayesOpt
         self.use_smote  = use_smote 
+        self.is_fashion_brands_predifinied = is_fashion_brands_predifinied 
 
         self.nlp = None
         self.tfidf_vectorizer = None
@@ -125,11 +126,8 @@ class KeywordSpamClassifier:
             caps_words_ratio = sum(1 for word in words if word.isupper() and len(word) > 1) / word_count if word_count > 0 else 0
             
             # Brand-related features (common fashion brands that might be spammed)
-            fashion_brands = ['nike', 'adidas', 'supreme', 'gucci', 'lv', 'louis', 'vuitton', 'chanel', 
-                            'prada', 'versace', 'dolce', 'gabbana', 'balenciaga', 'off', 'white',
-                            'yeezy', 'jordan', 'levi', 'calvin', 'klein', 'tommy', 'hilfiger']
             
-            brand_count = sum(1 for brand in fashion_brands if brand in desc_clean)
+            brand_count = sum(1 for brand in self.fashion_brands if brand in desc_clean)
             brand_ratio = brand_count / word_count if word_count > 0 else 0
             
             features.append({
@@ -149,6 +147,88 @@ class KeywordSpamClassifier:
         
         return pd.DataFrame(features)
     
+    def infer_fashion_brands_ner(self, descriptions: List[str], labels: List[int], top_n: int = 30) -> pd.DataFrame:
+        """
+        Detect spam-prone brand names using NER (ORG/PRODUCT).
+        
+        Args:
+            descriptions: List of text descriptions
+            labels: List of corresponding labels (1=spam, 0=not spam)
+            top_n: Maximum number of brands to select
+        
+        Returns:
+            pd.DataFrame with columns ['brand', 'entity_label', '#spam', '#non spam', 'ratio']
+        """
+        if not self.nlp:
+            print("spaCy model not loaded, skipping NER-based brand detection.")
+            self.fashion_brands = []
+            return pd.DataFrame(columns=['brand', 'entity_label', '#spam', '#non spam', 'ratio'])
+
+        if self.is_fashion_brands_predifinied:
+           self.fashion_brands = ['nike', 'adidas', 'supreme', 'gucci', 'lv', 'louis', 'vuitton', 'chanel', 
+                                  'prada', 'versace', 'dolce', 'gabbana', 'balenciaga', 'off', 'white',
+                                  'yeezy', 'jordan', 'levi', 'calvin', 'klein', 'tommy', 'hilfiger']
+           return pd.DataFrame(columns=['brand', 'entity_label', '#spam', '#non spam', 'ratio'])
+
+        spam_entities = []
+        nonspam_entities = []
+
+        # Collect (entity_text, entity_label) tuples
+        for text, lbl in zip(descriptions, labels):
+            if not text or not isinstance(text, str):
+                continue
+            doc = self.nlp(text)
+            for ent in doc.ents:
+                if ent.label_ in ["ORG", "PRODUCT"]:
+                    clean_ent = ent.text.strip().lower()
+                    if len(clean_ent.split()) <= 3 and clean_ent.isalpha():
+                        pair = (clean_ent, ent.label_)
+                        if lbl == 1:
+                            spam_entities.append(pair)
+                        else:
+                            nonspam_entities.append(pair)
+
+        # Count frequencies
+        spam_counter = Counter(spam_entities)
+        nonspam_counter = Counter(nonspam_entities)
+
+        # Compute ratio = (spam_count + 1) / (nonspam_count + 1)
+        brand_ratios = {}
+        all_brands = set(spam_counter.keys()).union(set(nonspam_counter.keys()))
+        for brand_pair in all_brands:
+            spam_count = spam_counter.get(brand_pair, 0)
+            nonspam_count = nonspam_counter.get(brand_pair, 0)
+            ratio = (spam_count + 1) / (nonspam_count + 1)
+            brand_ratios[brand_pair] = ratio
+
+        # Keep only brands where ratio > 1 (more frequent in spam than non-spam)
+        spammy_brands = {brand_pair: ratio for brand_pair, ratio in brand_ratios.items() if ratio > 1}
+
+        # Sort by ratio descending and limit to top_n
+        top_brands = sorted(spammy_brands.items(), key=lambda x: x[1], reverse=True)[:top_n]
+
+        # Separate brand names and labels
+        candidate_brands = [brand for (brand, label), _ in top_brands]  # store only names
+        self.fashion_brands = candidate_brands
+
+        # Build DataFrame with counts and ratio
+        df_brands = pd.DataFrame(
+            [
+                {
+                    'brand': brand,
+                    'entity_label': label,
+                    '#spam': spam_counter.get((brand, label), 0),
+                    '#non spam': nonspam_counter.get((brand, label), 0),
+                    'ratio': ratio
+                }
+                for (brand, label), ratio in top_brands
+            ]
+        )
+
+        #print(f"Auto-detected spam-prone brands (NER-based, ratio>1): {candidate_brands}")
+        return df_brands
+
+
     def extract_named_entities(self, descriptions: List[str]) -> List[str]:
         """
         Extract named entities from descriptions using spaCy.
@@ -351,6 +431,8 @@ class KeywordSpamClassifier:
 
     def extract_training_features(self, X: pd.DataFrame, y: pd.Series):
         descriptions = X['description'].tolist()
+
+        _ = self.infer_fashion_brands_ner(descriptions = descriptions, labels = y) 
         
         # Extract basic features
         basic_features = self.extract_basic_features(descriptions)
